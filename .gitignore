@@ -804,3 +804,6 @@ wandb/
 timings/
 output_finetune/
 env_log.json
+Qwen2.5-3B-NVFP4A16
+Qwen2.5-7B-NVFP4A16
+Qwen2.5-14B-NVFP4A16
