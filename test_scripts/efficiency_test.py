@@ -9,10 +9,14 @@ import json
 import pandas as pd
 
 def save_results(args, results):
-    with open(f"results_{args.model}_add_lora_{args.add_lora}.json", "a") as f:
-        json.dump(results, f)
-    df = pd.DataFrame(results)
-    df.to_csv(f"results_{args.model}_add_lora_{args.add_lora}.csv", index=False)
+    print(f"Debug: results type: {type(results)}")
+    print(f"Debug: results content: {results}")
+    if isinstance(results, dict):
+        print(f"Debug: results keys: {list(results.keys())}")
+        print(f"Debug: results values: {list(results.values())}")
+    df = pd.DataFrame([results])  # Wrap the dictionary in a list
+    safe_model_name = args.model.replace('/', '_').replace('\\', '_')
+    df.to_csv(f"results_{safe_model_name}_add_lora_{args.add_lora}.csv", index=False)
 
 def padding_tokens(text: str, tok, max_tokens: int) -> str:
     ids = tok.encode(text)
@@ -32,7 +36,7 @@ def prepare_prompts(args, tok, prefill_length: int):
 
 def test_efficiency(args):
     if args.add_lora:
-        model = LLM(args.model, gpu_memory_utilization=args.gpu_memory_utilization, enable_lora=True)
+        model = LLM(args.model, gpu_memory_utilization=args.gpu_memory_utilization, enable_lora=True, max_lora_rank=args.max_lora_rank)
     else:
         model = LLM(args.model, gpu_memory_utilization=args.gpu_memory_utilization)
     tok = model.get_tokenizer()
@@ -103,6 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_path", type=str, default="bunnycore/qwen-2.5-3b-lora_model")
     parser.add_argument("--test_mode", type=str, default="mixed", choices=["prefill", "decode", "mixed"])
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.8)
+    parser.add_argument("--max_lora_rank", type=int, default=16)
     args = parser.parse_args()
     results = test_efficiency(args)
     save_results(args, results)

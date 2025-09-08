@@ -96,8 +96,7 @@ python test_scripts/efficiency_test.py \
 ```
 
 ## 三、生成 Dummy LoRA（用于纯速度基准）
-
-当仅关注 速度 而不关注 精度 时，可使用 零初始化的 `Dummy LoRA` 来模拟「加载 LoRA 分支」的开销。
+当仅关注 速度 而不关注 精度 时，可使用 零初始化的 `Dummy LoRA` 来模拟「加载 LoRA 分支」的开销。(同样在 vllm 环境中测试)
 
 示例：为 `Qwen/Qwen2.5-7B` 生成 `Dummy LoRA（rank=64）`
 ```bash
@@ -117,4 +116,4 @@ python test_scripts/efficiency_test.py \
   --lora_path /path/to/qwen25_7b_lora_init_default \
   --batch_size 1
 ```
-默认 LoRA rank 为 16
+由于 VLLM 会根据 max_lora_rank 预分配显存已达到最佳的性能，我在 efficiency_test.py 默认 max_lora_rank为 16 （默认值），如果需要修改 lora rank 进行消融测试，请保证 efficiency_test 中的 max_lora_rank 大于当前传入的 lora rank
