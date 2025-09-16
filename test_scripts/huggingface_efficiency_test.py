@@ -1,12 +1,11 @@
-from vllm import LLM
-from vllm import SamplingParams
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import time
-from peft import LoraModel
-from vllm.lora.request import LoRARequest
 import argparse
 import os
 import json
 import pandas as pd
+import torch
+from llmcompressor.utils import dispatch_for_generation
 
 def save_results(args, results):
     print(f"Debug: results type: {type(results)}")
@@ -16,10 +15,7 @@ def save_results(args, results):
         print(f"Debug: results values: {list(results.values())}")
     df = pd.DataFrame([results])  # Wrap the dictionary in a list
     safe_model_name = args.model.replace('/', '_').replace('\\', '_')
-    if args.batch_size != 1:
-        df.to_csv(f"results_{safe_model_name}_add_lora_{args.add_lora}_lora_rank_{args.max_lora_rank}_batch_size_{args.batch_size}.csv", index=False)
-    else:
-        df.to_csv(f"results_{safe_model_name}_add_lora_{args.add_lora}_lora_rank_{args.max_lora_rank}.csv", index=False)
+    df.to_csv(f"huggingface_results_{safe_model_name}_add_lora_{args.add_lora}.csv", index=False)
 
 def padding_tokens(text: str, tok, max_tokens: int) -> str:
     ids = tok.encode(text)
@@ -38,35 +34,76 @@ def prepare_prompts(args, tok, prefill_length: int):
     return prompts
 
 def test_efficiency(args):
-    if args.add_lora:
-        model = LLM(args.model, gpu_memory_utilization=args.gpu_memory_utilization, enable_lora=True, max_lora_rank=args.max_lora_rank, max_model_len=args.max_model_len)
+    # Load model and tokenizer following the pattern from quantize_nvfp4.py
+    MODEL_ID = args.model
+    if 'qwen' in MODEL_ID.lower():
+        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto", trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    elif 'llama' in MODEL_ID.lower():
+        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+        tok = AutoTokenizer.from_pretrained(MODEL_ID)
     else:
-        model = LLM(args.model, gpu_memory_utilization=args.gpu_memory_utilization, max_model_len=args.max_model_len)
-    tok = model.get_tokenizer()
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, torch_dtype="auto", trust_remote_code=True
+        )
+        tok = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    dispatch_for_generation(model)
+    # Set pad token if not present
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
     prompts = prepare_prompts(args, tok, prefill_length=args.prefill_length)
     
     # test prefill time
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1, ignore_eos=True)
     start_prefill_time = time.time()
-    output = model.generate(prompts, sampling_params, lora_request=LoRARequest("test_adapter", 1, args.lora_path) if args.add_lora else None)
+    # Tokenize all prompts for prefill test
+    input_ids_list = []
+    for prompt in prompts:
+        input_ids = tok(prompt, return_tensors="pt", padding=True, truncation=True).input_ids.to(model.device)
+        input_ids_list.append(input_ids)
+    
+    # Generate 1 token for prefill test
+    prefill_outputs = []
+    for input_ids in input_ids_list:
+        with torch.no_grad():
+            output = model.generate(
+                input_ids,
+                max_new_tokens=1,
+                do_sample=False,
+                temperature=1.0,
+                top_p=1.0,
+                pad_token_id=tok.eos_token_id
+            )
+        prefill_outputs.append(output)
+    
     end_prefill_time = time.time()
     elapsed_prefill_time = end_prefill_time - start_prefill_time
-    prefill_tokens_generated = sum(len(req.prompt_token_ids) for req in output)
+    prefill_tokens_generated = sum(input_ids.shape[1] for input_ids in input_ids_list)
     tokens_per_second = prefill_tokens_generated / elapsed_prefill_time
 
-    print(f"Batch size: {len(output)}")
+    print(f"Batch size: {len(prefill_outputs)}")
     print(f"Total prefill tokens: {prefill_tokens_generated}")
     print(f"Prefill time taken: {elapsed_prefill_time:.4f} seconds")
     print(f"Prefill tokens per second: {tokens_per_second:.2f}")
-    
     # test total time
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=args.decode_length, ignore_eos=True)
     start_total_time = time.time()
-    output = model.generate(prompts, sampling_params, lora_request=LoRARequest("test_adapter", 1, args.lora_path) if args.add_lora else None)
+    # Generate full sequences
+    total_outputs = []
+    for input_ids in input_ids_list:
+        with torch.no_grad():
+            output = model.generate(
+                input_ids,
+                max_new_tokens=args.decode_length,
+                do_sample=False,
+                temperature=1.0,
+                top_p=1.0,
+                pad_token_id=tok.eos_token_id
+            )
+        total_outputs.append(output)
+    
     end_total_time = time.time()
     elapsed_total_time = end_total_time - start_total_time
     # Calculate total generated tokens across all requests in the batch
-    total_tokens_generated = sum(len(req.outputs[0].token_ids) for req in output)
+    total_tokens_generated = sum(output.shape[1] - input_ids.shape[1] for output, input_ids in zip(total_outputs, input_ids_list))
     tokens_per_second_total = total_tokens_generated / elapsed_total_time
     
     print(f"\nTotal generation results:")
@@ -102,16 +139,13 @@ def test_efficiency(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="Qwen2.5-3B-NVFP4A16")
+    parser.add_argument("--model", type=str, default="quantized_model/Qwen2.5-3B-NVFP4A16")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--prefill_length", type=int, default=1024)
-    parser.add_argument("--decode_length", type=int, default=8192)
-    parser.add_argument("--max_model_len", type=int, default=9216)
+    parser.add_argument("--decode_length", type=int, default=128)
     parser.add_argument("--add_lora", action="store_true")
     parser.add_argument("--lora_path", type=str, default="bunnycore/qwen-2.5-3b-lora_model")
     parser.add_argument("--test_mode", type=str, default="mixed", choices=["prefill", "decode", "mixed"])
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.8)
-    parser.add_argument("--max_lora_rank", type=int, default=32)
     args = parser.parse_args()
     results = test_efficiency(args)
     save_results(args, results)
